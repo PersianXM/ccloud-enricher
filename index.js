@@ -246,6 +246,33 @@ async function handle(request) {
     });
   }
 
+  // Live diagnosis: shows the raw whatson HTTP status for a title
+  if (url.pathname === "/debug/rt") {
+    const title = url.searchParams.get("title") || "";
+    const params = new URLSearchParams({
+      title,
+      ratings_filters: "rottentomatoes_critics,rottentomatoes_users",
+    });
+    const headers = { Accept: "application/json" };
+    if (WHATSON_API_KEY) headers["X-Api-Key"] = WHATSON_API_KEY;
+    const t0 = Date.now();
+    try {
+      const resp = await fetch(`${WHATSON_BASE}?${params.toString()}`, {
+        headers,
+        signal: AbortSignal.timeout(WHATSON_ATTEMPT_TIMEOUT_MS),
+      });
+      const body = await resp.text();
+      return json({
+        title,
+        status: resp.status,
+        ms: Date.now() - t0,
+        bodyPreview: body.substring(0, 300),
+      });
+    } catch (e) {
+      return json({ title, error: String(e), ms: Date.now() - t0 }, 500);
+    }
+  }
+
   if (!url.pathname.startsWith("/api/")) {
     return json({ error: "Not found" }, 404);
   }
