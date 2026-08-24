@@ -303,7 +303,8 @@ async function handle(request) {
 }
 
 const server = require("http").createServer((req, res) => {
-  handle(new Request(req.url, { method: req.method, headers: req.headers }))
+  // Node's req.url is path-only ("/health") — Request needs an absolute URL
+  handle(new Request(`http://localhost:${PORT}${req.url}`, { method: req.method, headers: req.headers }))
     .then(async (resp) => {
       res.writeHead(resp.status, Object.fromEntries(resp.headers));
       const body = await resp.text();
