@@ -246,31 +246,47 @@ async function handle(request) {
     });
   }
 
-  // Live diagnosis: shows the raw whatson HTTP status for a title
+  // Live diagnosis: runs the full fetchRT pipeline and reports details
   if (url.pathname === "/debug/rt") {
     const title = url.searchParams.get("title") || "";
+    const year = parseInt(url.searchParams.get("year") || "0", 10) || null;
+    const words = title.trim().split(/\s+/).filter(Boolean);
+    const attempts = [title];
+    if (words.length > 1) attempts.push(words.slice(0, 2).join(" "));
+    if (words.length > 2) attempts.push(words[0]);
+
+    const t0 = Date.now();
+    const outcome = await fetchRT(title, year, Date.now() + 15000);
+    const ms = Date.now() - t0;
+
+    // Also capture the raw first-attempt results for inspection
     const params = new URLSearchParams({
-      title,
+      title: attempts[0],
       ratings_filters: "rottentomatoes_critics,rottentomatoes_users",
     });
     const headers = { Accept: "application/json" };
     if (WHATSON_API_KEY) headers["X-Api-Key"] = WHATSON_API_KEY;
-    const t0 = Date.now();
+    let rawResults = [];
+    let rawStatus = null;
     try {
       const resp = await fetch(`${WHATSON_BASE}?${params.toString()}`, {
         headers,
         signal: AbortSignal.timeout(WHATSON_ATTEMPT_TIMEOUT_MS),
       });
-      const body = await resp.text();
-      return json({
-        title,
-        status: resp.status,
-        ms: Date.now() - t0,
-        bodyPreview: body.substring(0, 300),
-      });
+      rawStatus = resp.status;
+      const data = await resp.json();
+      rawResults = (data.results || []).slice(0, 6).map((r) => ({
+        title: r.title,
+        year: r.release_date ? String(r.release_date).substring(0, 4) : null,
+        critics: r.rotten_tomatoes ? r.rotten_tomatoes.critics_rating : null,
+        audience: r.rotten_tomatoes ? r.rotten_tomatoes.users_rating : null,
+        normTitle: normTitle(r.title),
+      }));
     } catch (e) {
-      return json({ title, error: String(e), ms: Date.now() - t0 }, 500);
+      rawStatus = String(e);
     }
+
+    return json({ title, year, attempts, outcome, ms, rawStatus, rawResults });
   }
 
   if (!url.pathname.startsWith("/api/")) {
