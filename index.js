@@ -255,6 +255,7 @@ async function handle(request) {
       service: "ccloud-enricher",
       upstream: UPSTREAM_HOST,
       whatson: WHATSON_BASE,
+      whatsonKeyConfigured: WHATSON_API_KEY.length > 0, // never leak the key itself
       cacheEntries: cache.size,
     });
   }
@@ -281,12 +282,27 @@ async function handle(request) {
     if (WHATSON_API_KEY) headers["X-Api-Key"] = WHATSON_API_KEY;
     let rawResults = [];
     let rawStatus = null;
+    let keyUsed = WHATSON_API_KEY.length > 0;
     try {
       const resp = await fetch(`${WHATSON_BASE}?${params.toString()}`, {
         headers,
         signal: AbortSignal.timeout(WHATSON_ATTEMPT_TIMEOUT_MS),
       });
       rawStatus = resp.status;
+      // 429 with the API key attached vs anonymous are different problems:
+      //   keyUsed=false + 429 -> anonymous quota (100/h), set the env var
+      //   keyUsed=true  + 429 -> keyed quota exhausted or key invalid
+      if (resp.status === 429) {
+        return json({
+          title, year, attempts,
+          outcome, ms: Date.now() - t0,
+          rawStatus, keyUsed,
+          hint: keyUsed
+            ? "keyed quota exhausted or invalid key"
+            : "ANONYMOUS quota — WHATSON_API_KEY env var not set on this deploy",
+          rawResults,
+        });
+      }
       const data = await resp.json();
       rawResults = (data.results || []).slice(0, 6).map((r) => ({
         title: r.title,
