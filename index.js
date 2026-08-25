@@ -21,9 +21,10 @@ const UPSTREAM_HOST = process.env.UPSTREAM_HOST || "https://server-hi-speed-iran
 const WHATSON_BASE = process.env.WHATSON_BASE || "https://whatson-api.onrender.com/";
 const WHATSON_API_KEY = process.env.WHATSON_API_KEY || "";
 const PORT = parseInt(process.env.PORT, 10) || 8081;
-const ENRICH_TIMEOUT_MS = parseInt(process.env.ENRICH_TIMEOUT_MS || "10000", 10);
+const ENRICH_TIMEOUT_MS = parseInt(process.env.ENRICH_TIMEOUT_MS || "15000", 10);
 const ENRICH_CONCURRENCY = parseInt(process.env.ENRICH_CONCURRENCY || "8", 10);
-const WHATSON_ATTEMPT_TIMEOUT_MS = 8000;
+const WHATSON_ATTEMPT_TIMEOUT_MS = parseInt(process.env.WHATSON_ATTEMPT_TIMEOUT_MS || "20000", 10);
+const SELF_URL = process.env.SELF_URL || "https://ccloud-enricher.onrender.com";
 const SCORE_TTL_MS = 7 * 24 * 3600 * 1000;   // 7 days
 const NEGATIVE_TTL_MS = 24 * 3600 * 1000;    // 24 hours
 const CACHE_MAX_ENTRIES = 20000;
@@ -66,6 +67,18 @@ setInterval(() => {
     if (now > v.expires) cache.delete(k);
   }
 }, 10 * 60 * 1000).unref();
+
+/**
+ * Keep-alive: Render free services spin down after ~15 min without inbound
+ * traffic. Ping ourselves (stays within our 750 free instance-hours: one
+ * always-on service ≈ 720h/month) and whatson (inbound traffic keeps the
+ * author's instance warm too — ~6 req/h of the anonymous quota).
+ */
+const KEEPALIVE_MS = 10 * 60 * 1000;
+setInterval(() => {
+  fetch(`${SELF_URL}/health`).catch(() => {});
+  fetch(`${WHATSON_BASE}?title=keepalive`).catch(() => {});
+}, KEEPALIVE_MS).unref();
 
 /* ─────────────────────────── helpers ─────────────────────────── */
 
