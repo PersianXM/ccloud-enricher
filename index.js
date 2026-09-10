@@ -25,6 +25,9 @@ const ENRICH_TIMEOUT_MS = parseInt(process.env.ENRICH_TIMEOUT_MS || "15000", 10)
 const ENRICH_CONCURRENCY = parseInt(process.env.ENRICH_CONCURRENCY || "8", 10);
 const WHATSON_ATTEMPT_TIMEOUT_MS = parseInt(process.env.WHATSON_ATTEMPT_TIMEOUT_MS || "20000", 10);
 const SELF_URL = process.env.SELF_URL || "https://ccloud-enricher.onrender.com";
+const TMDB_API_BASE = process.env.TMDB_API_BASE || "https://api.themoviedb.org";
+const TMDB_IMAGE_BASE = process.env.TMDB_IMAGE_BASE || "https://image.tmdb.org";
+const TMDB_TIMEOUT_MS = parseInt(process.env.TMDB_TIMEOUT_MS || "20000", 10);
 const SCORE_TTL_MS = 7 * 24 * 3600 * 1000;   // 7 days
 const NEGATIVE_TTL_MS = 24 * 3600 * 1000;    // 24 hours
 const CACHE_MAX_ENTRIES = 20000;
@@ -244,6 +247,53 @@ async function enrichAll(items, deadline) {
   );
 }
 
+/* ─────────────────────────── TMDb proxy (censorship bypass) ─────────────────────────── */
+
+// TMDb is DNS-sinkholed in Iran (api/image.tmdb.org → 10.10.34.x) and the old
+// *.workers.dev proxy is SNI-filtered at the TLS layer. This Render endpoint is
+// reachable from Iran (verified), so the Android app points its TMDb base URL
+// here:  /tmdb/3/*   → api.themoviedb.org/3/*
+//        /tmdb/t/p/* → image.tmdb.org/t/p/*   (posters/backdrops)
+
+async function proxyTmdbApi(upstreamUrl) {
+  try {
+    const resp = await fetch(upstreamUrl, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(TMDB_TIMEOUT_MS),
+    });
+    const body = await resp.text();
+    return new Response(body, {
+      status: resp.status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=21600",
+        "access-control-allow-origin": "*",
+      },
+    });
+  } catch (e) {
+    return json({ error: "TMDb unreachable", detail: String(e) }, 502);
+  }
+}
+
+async function proxyTmdbImage(upstreamUrl) {
+  try {
+    const resp = await fetch(upstreamUrl, {
+      signal: AbortSignal.timeout(TMDB_TIMEOUT_MS),
+    });
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return new Response(buf, {
+      status: resp.status,
+      headers: {
+        "content-type": resp.headers.get("content-type") || "image/jpeg",
+        "cache-control": "public, max-age=2592000, immutable",
+        "access-control-allow-origin": "*",
+      },
+    });
+  } catch (e) {
+    return json({ error: "TMDb image unreachable", detail: String(e) }, 502);
+  }
+}
+
 /* ─────────────────────────── server ─────────────────────────── */
 
 async function handle(request) {
@@ -257,6 +307,8 @@ async function handle(request) {
       whatson: WHATSON_BASE,
       whatsonKeyConfigured: WHATSON_API_KEY.length > 0, // never leak the key itself
       cacheEntries: cache.size,
+      tmdbApi: TMDB_API_BASE,
+      tmdbImage: TMDB_IMAGE_BASE,
     });
   }
 
@@ -316,6 +368,18 @@ async function handle(request) {
     }
 
     return json({ title, year, attempts, outcome, ms, rawStatus, rawResults });
+  }
+
+  // ── TMDb proxy: /tmdb/3/* (API) and /tmdb/t/p/* (posters/backdrops) ──
+  if (url.pathname === "/tmdb" || url.pathname.startsWith("/tmdb/")) {
+    const rest = url.pathname.slice("/tmdb".length);
+    if (rest.startsWith("/3/")) {
+      return proxyTmdbApi(TMDB_API_BASE + rest + url.search);
+    }
+    if (rest.startsWith("/t/")) {
+      return proxyTmdbImage(TMDB_IMAGE_BASE + rest);
+    }
+    return json({ error: "Not found" }, 404);
   }
 
   if (!url.pathname.startsWith("/api/")) {
@@ -379,7 +443,8 @@ const server = require("http").createServer((req, res) => {
   handle(new Request(`http://localhost:${PORT}${req.url}`, { method: req.method, headers: req.headers }))
     .then(async (resp) => {
       res.writeHead(resp.status, Object.fromEntries(resp.headers));
-      const body = await resp.text();
+      // arrayBuffer (not text) so binary image proxying stays byte-exact
+      const body = Buffer.from(await resp.arrayBuffer());
       res.end(body);
     })
     .catch((e) => {
