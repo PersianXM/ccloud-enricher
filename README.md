@@ -30,7 +30,7 @@ Environment Variables (اختیاری):
 |---|---|---|
 | `UPSTREAM_HOST` | `https://server-hi-speed-iran.info` | API اصلی |
 | `WHATSON_BASE` | `https://whatson-api.onrender.com/` | منبع امتیاز RT |
-| `WHATSON_API_KEY` | خالی | کلید رایگان = ۵۰۰ req/h به‌جای ۱۰۰ |
+| `WHATSON_API_KEY` | خالی | کلید whatson = ۵۰۰ req/h به‌جای ۵۰ ناشناس. **مکانیزم: به‌صورت query param `api_key` ارسال می‌شود** (هدر `X-Api-Key` توسط whatson نادیده گرفته می‌شود) |
 | `ENRICH_TIMEOUT_MS` | `10000` | سقف زمان enrichment هر پاسخ |
 
 ## تست

@@ -80,7 +80,7 @@ setInterval(() => {
 const KEEPALIVE_MS = 10 * 60 * 1000;
 setInterval(() => {
   fetch(`${SELF_URL}/health`).catch(() => {});
-  fetch(`${WHATSON_BASE}?title=keepalive`).catch(() => {});
+  fetch(whatsonUrl(new URLSearchParams({ title: "keepalive" }))).catch(() => {});
 }, KEEPALIVE_MS).unref();
 
 /* ─────────────────────────── helpers ─────────────────────────── */
@@ -113,6 +113,22 @@ function passthrough(bodyText) {
  * Returns { scores, definitive } — definitive=false (429/5xx/timeout)
  * must NOT be negative-cached by the caller.
  */
+/**
+ * Builds a whatson URL with the API key passed as the `api_key` query param.
+ *
+ * IMPORTANT: whatson expects the key as `api_key` (query). The previous
+ * implementation sent it as an `X-Api-Key` header, which whatson silently
+ * ignores — every request then fell back to the anonymous, per-IP limit
+ * (50/h) on Render's shared egress IP, which is almost always exhausted,
+ * so /debug/rt returned 429 and NO title ever got RT scores.
+ */
+function whatsonUrl(params) {
+  const qs = params.toString();
+  return WHATSON_API_KEY
+    ? `${WHATSON_BASE}?${qs}&api_key=${encodeURIComponent(WHATSON_API_KEY)}`
+    : `${WHATSON_BASE}?${qs}`;
+}
+
 async function fetchRT(title, year, deadline) {
   const words = title.trim().split(/\s+/).filter(Boolean);
   const attempts = [title];
@@ -130,11 +146,10 @@ async function fetchRT(title, year, deadline) {
       ratings_filters: "rottentomatoes_critics,rottentomatoes_users",
     });
     const headers = { Accept: "application/json" };
-    if (WHATSON_API_KEY) headers["X-Api-Key"] = WHATSON_API_KEY;
 
     let resp;
     try {
-      resp = await fetch(`${WHATSON_BASE}?${params.toString()}`, {
+      resp = await fetch(whatsonUrl(params), {
         headers,
         signal: AbortSignal.timeout(WHATSON_ATTEMPT_TIMEOUT_MS),
       });
@@ -331,12 +346,11 @@ async function handle(request) {
       ratings_filters: "rottentomatoes_critics,rottentomatoes_users",
     });
     const headers = { Accept: "application/json" };
-    if (WHATSON_API_KEY) headers["X-Api-Key"] = WHATSON_API_KEY;
     let rawResults = [];
     let rawStatus = null;
     let keyUsed = WHATSON_API_KEY.length > 0;
     try {
-      const resp = await fetch(`${WHATSON_BASE}?${params.toString()}`, {
+      const resp = await fetch(whatsonUrl(params), {
         headers,
         signal: AbortSignal.timeout(WHATSON_ATTEMPT_TIMEOUT_MS),
       });
@@ -350,7 +364,7 @@ async function handle(request) {
           outcome, ms: Date.now() - t0,
           rawStatus, keyUsed,
           hint: keyUsed
-            ? "keyed quota exhausted or invalid key"
+            ? "keyed quota exhausted or invalid key (key is sent as ?api_key=)"
             : "ANONYMOUS quota — WHATSON_API_KEY env var not set on this deploy",
           rawResults,
         });
