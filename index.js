@@ -13,8 +13,9 @@
  *   Injects `tomatometer` / `popcornmeter` (0-100 ints) into each item.
  *   Absent fields = no data; the app hides them (no fake data, ever).
  *
- * Cache: in-memory Map with TTL (resets on restart/sleep — scores are
- * re-fetched on demand; whatson remains the single source of truth).
+ * Cache: in-memory Map with TTL, PERSISTED to a JSON file (survives Render
+ *   restarts/deploys so the limited whatson quota is not re-spent). Positive
+ *   7 days, definitive misses 24h, transient failures never cached.
  */
 
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST || "https://server-hi-speed-iran.info";
@@ -35,9 +36,17 @@ const CACHE_MAX_ENTRIES = 20000;
 const ENRICHABLE_PREFIXES = ["/api/movie/", "/api/serie/", "/api/search/", "/api/poster/"];
 const LATIN_TITLE_RE = /^[\x20-\x7E]+$/;
 
-/* ─────────────────────────── in-memory cache ─────────────────────────── */
+/* ─────────────────────────── cache (persistent) ─────────────────────────── */
+// In-memory Map persisted to a JSON file, so refreshes/deploys on Render do not
+// re-spend the limited whatson quota. Scores remain the single source of truth.
+
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 const cache = new Map(); // key -> { value: string, expires: number }
+const CACHE_FILE =
+  process.env.CACHE_FILE || path.join(os.tmpdir(), "ccloud-rt-cache.json");
 
 function cacheGet(key) {
   const entry = cache.get(key);
@@ -62,7 +71,44 @@ function cachePut(key, value, ttlMs) {
     }
   }
   cache.set(key, { value, expires: Date.now() + ttlMs });
+  scheduleCacheSave();
 }
+
+let saveTimer = null;
+function scheduleCacheSave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveCache();
+  }, 3000);
+}
+
+function saveCache() {
+  try {
+    const now = Date.now();
+    const out = {};
+    for (const [k, v] of cache) {
+      if (now <= v.expires) out[k] = v;
+    }
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(out));
+  } catch (e) {
+    // Best-effort persistence; never break a request path.
+  }
+}
+
+function loadCache() {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return;
+    const obj = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+    const now = Date.now();
+    for (const [k, v] of Object.entries(obj)) {
+      if (v && v.expires && now <= v.expires) cache.set(k, v);
+    }
+  } catch (e) {
+    // Corrupt cache → start fresh; enrichment will refill it.
+  }
+}
+loadCache();
 
 setInterval(() => {
   const now = Date.now();
@@ -71,16 +117,23 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref();
 
+/* ─────────────────── whatson quota circuit breaker ─────────────────── */
+// On a 429 the keyed quota is exhausted; stop hammering whatson for a cooldown
+// window instead of firing one request per remaining catalog item.
+const WHATSON_COOLDOWN_MS = parseInt(process.env.WHATSON_COOLDOWN_MS || "600000", 10); // 10 min
+let whatsonCooldownUntil = 0;
+function whatsonCooling() {
+  return Date.now() < whatsonCooldownUntil;
+}
+
 /**
  * Keep-alive: Render free services spin down after ~15 min without inbound
- * traffic. Ping ourselves (stays within our 750 free instance-hours: one
- * always-on service ≈ 720h/month) and whatson (inbound traffic keeps the
- * author's instance warm too — ~6 req/h of the anonymous quota).
+ * traffic. Ping ONLY ourselves — the old whatson ping burned keyed quota
+ * (~6/h) for no benefit now that the RT cache is persisted.
  */
 const KEEPALIVE_MS = 10 * 60 * 1000;
 setInterval(() => {
   fetch(`${SELF_URL}/health`).catch(() => {});
-  fetch(whatsonUrl(new URLSearchParams({ title: "keepalive" }))).catch(() => {});
 }, KEEPALIVE_MS).unref();
 
 /* ─────────────────────────── helpers ─────────────────────────── */
@@ -130,6 +183,8 @@ function whatsonUrl(params) {
 }
 
 async function fetchRT(title, year, deadline) {
+  if (whatsonCooling()) return { scores: null, definitive: false };
+
   const words = title.trim().split(/\s+/).filter(Boolean);
   const attempts = [title];
   if (words.length > 1) attempts.push(words.slice(0, 2).join(" "));
@@ -137,6 +192,7 @@ async function fetchRT(title, year, deadline) {
 
   for (let i = 0; i < attempts.length; i++) {
     if (Date.now() >= deadline) return { scores: null, definitive: false };
+    if (whatsonCooling()) return { scores: null, definitive: false };
 
     const query = attempts[i];
     const requireTitleMatch = i > 0; // prefix queries: title must match
@@ -158,6 +214,10 @@ async function fetchRT(title, year, deadline) {
     }
 
     if (resp.status === 429 || resp.status >= 500) {
+      if (resp.status === 429) {
+        // Quota exhausted → stop hammering whatson for a cooldown window.
+        whatsonCooldownUntil = Date.now() + WHATSON_COOLDOWN_MS;
+      }
       return { scores: null, definitive: false }; // transient → retry later
     }
     if (!resp.ok) continue; // 404 etc. → this variant truly has nothing
@@ -172,6 +232,11 @@ async function fetchRT(title, year, deadline) {
     const results = (data && data.results) || [];
     const match = pickMatch(results, title, year, requireTitleMatch);
     if (match) return { scores: match, definitive: true };
+
+    // The query returned rows but none is a usable RT match → a shorter/broader
+    // query is even less likely to be the right title; stop here to save quota.
+    if (results.length > 0) return { scores: null, definitive: true };
+    // results empty → try the next (shorter) variant
   }
 
   return { scores: null, definitive: true };
@@ -321,7 +386,9 @@ async function handle(request) {
       upstream: UPSTREAM_HOST,
       whatson: WHATSON_BASE,
       whatsonKeyConfigured: WHATSON_API_KEY.length > 0, // never leak the key itself
+      whatsonCooling: whatsonCooling(), // true = 429 cooldown active (quota exhausted)
       cacheEntries: cache.size,
+      cacheFile: CACHE_FILE,
       tmdbApi: TMDB_API_BASE,
       tmdbImage: TMDB_IMAGE_BASE,
     });
