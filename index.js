@@ -398,6 +398,12 @@ async function handle(request) {
   if (url.pathname === "/debug/rt") {
     const title = url.searchParams.get("title") || "";
     const year = parseInt(url.searchParams.get("year") || "0", 10) || null;
+    if (whatsonCooling()) {
+      return json({
+        title, year, cooling: true,
+        hint: "whatson 429 cooldown active (quota exhausted) — raw probe skipped to save quota",
+      });
+    }
     const words = title.trim().split(/\s+/).filter(Boolean);
     const attempts = [title];
     if (words.length > 1) attempts.push(words.slice(0, 2).join(" "));
